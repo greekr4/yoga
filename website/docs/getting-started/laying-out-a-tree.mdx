@@ -78,7 +78,7 @@ Java backed Yoga Nodes are garbage collected, and do not need to manually be fre
 <TabItem value="js" label="JavaScript">
 
 ```ts
-import Yoga, {Edge, FlexDirection, PositionType} from 'yoga-layout';
+import Yoga, {Direction, Edge, FlexDirection, PositionType} from 'yoga-layout';
 
 const root = Yoga.Node.create();
 root.setFlexDirection(FlexDirection.Row);
@@ -102,10 +102,9 @@ Yoga Nodes are not freed automatically and should be discarded when no longer ne
 Nodes live in the WebAssembly heap, which is not visible to the JavaScript garbage collector. An application which repeatedly leaks nodes will grow the heap until new nodes fail to allocate. If an exception may be thrown after nodes are created (e.g. from within a [measure function](../advanced/external-layout-systems.mdx) during layout), freeing in a `finally` block guarantees the tree is released:
 
 ```ts
-const root = buildYogaTree();
 try {
   root.calculateLayout(undefined, undefined, Direction.LTR);
-  readLayoutResults(root);
+  // Read layout results, e.g. child0.getComputedLeft()
 } finally {
   root.freeRecursive();
 }
