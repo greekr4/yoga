@@ -281,6 +281,42 @@ export default function wrapAssembly(lib: any): Yoga {
   lib._yogaMeasureFuncs = new Map();
   lib._yogaDirtiedFuncs = new Map();
 
+  // A dirtied function runs while Yoga marks nodes dirty, deep inside
+  // WebAssembly. An exception must not unwind those frames: the stack pointer
+  // would not be restored and the nodes above would not be marked dirty. Hold
+  // the first exception and rethrow it once the call has returned.
+  let pendingDirtiedError: {error: unknown} | null = null;
+
+  function rethrowDirtiedError(): void {
+    if (pendingDirtiedError !== null) {
+      const {error} = pendingDirtiedError;
+      pendingDirtiedError = null;
+      throw error;
+    }
+  }
+
+  // Wasm calls that can mark nodes dirty, and so run dirtied functions. They
+  // are wrapped only once a dirtied function is set, so code that never sets
+  // one pays nothing.
+  const marksNodesDirty =
+    /^_YGNode(?:StyleSet\w+|InsertChild|RemoveChild|MarkDirty|CopyStyle|SetIsReferenceBaseline)$/;
+  let dirtiedErrorsRethrown = false;
+
+  function rethrowDirtiedErrorsAfterCalls(): void {
+    if (dirtiedErrorsRethrown) return;
+    dirtiedErrorsRethrown = true;
+    for (const name of Object.keys(lib)) {
+      if (marksNodesDirty.test(name)) {
+        const call = lib[name];
+        lib[name] = (...args: unknown[]) => {
+          const result = call(...args);
+          rethrowDirtiedError();
+          return result;
+        };
+      }
+    }
+  }
+
   function readYGValue(): Value {
     return {
       value: lib.HEAPF32[valueBufIdx],
@@ -902,9 +938,15 @@ export default function wrapAssembly(lib: any): Yoga {
     setDirtiedFunc(dirtiedFunc: DirtiedFunction | null): void {
       if (dirtiedFunc) {
         const nodeWeakRef = new WeakRef(this);
+        rethrowDirtiedErrorsAfterCalls();
         lib._yogaDirtiedFuncs.set(this._ptr, () => {
           const node = nodeWeakRef.deref();
-          if (node) dirtiedFunc(node);
+          if (!node) return;
+          try {
+            dirtiedFunc(node);
+          } catch (error) {
+            if (pendingDirtiedError === null) pendingDirtiedError = {error};
+          }
         });
         lib._jswrap_YGNodeSetDirtiedFunc(this._ptr);
       } else {
