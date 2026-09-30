@@ -295,6 +295,10 @@ export default function wrapAssembly(lib: any): Yoga {
     /^_YGNode(?:StyleSet\w+|InsertChild|RemoveChild|MarkDirty|CopyStyle|SetIsReferenceBaseline)$/;
   const unguardedCalls = new Map<string, (...args: unknown[]) => unknown>();
 
+  // Set when a guarded call returned normally and then rethrew a dirtied
+  // function's error, so the caller knows Yoga finished the change.
+  let dirtiedErrorAfterReturn = false;
+
   function guardDirtyingCall(call: (...args: unknown[]) => unknown) {
     return (...args: unknown[]) => {
       // A call made from inside a dirtied function keeps its own error apart
@@ -306,11 +310,15 @@ export default function wrapAssembly(lib: any): Yoga {
         result = call(...args);
       } catch (e) {
         pendingDirtiedError = outerError;
+        dirtiedErrorAfterReturn = false;
         throw e;
       }
       const ownError = pendingDirtiedError;
       pendingDirtiedError = outerError;
-      if (ownError !== null) throw ownError.error;
+      if (ownError !== null) {
+        dirtiedErrorAfterReturn = true;
+        throw ownError.error;
+      }
       return result;
     };
   }
@@ -485,14 +493,12 @@ export default function wrapAssembly(lib: any): Yoga {
 
     // --- Tree hierarchy ---
     insertChild(child: NodeImpl, index: number): void {
+      dirtiedErrorAfterReturn = false;
       try {
         lib._YGNodeInsertChild(this._ptr, child._ptr, index);
       } catch (e) {
-        // A dirtied function throws only after Yoga has inserted the child. A
-        // RuntimeError means Yoga aborted and the tree is unchanged.
-        if (!(e instanceof WebAssembly.RuntimeError)) {
-          this._attachChild(child, index);
-        }
+        // Yoga inserted the child if the error came from a dirtied function.
+        if (dirtiedErrorAfterReturn) this._attachChild(child, index);
         throw e;
       }
       this._attachChild(child, index);
@@ -504,12 +510,12 @@ export default function wrapAssembly(lib: any): Yoga {
     }
 
     removeChild(child: NodeImpl): void {
+      dirtiedErrorAfterReturn = false;
       try {
         lib._YGNodeRemoveChild(this._ptr, child._ptr);
       } catch (e) {
-        // A dirtied function throws only after Yoga has removed the child. A
-        // RuntimeError means Yoga aborted and the tree is unchanged.
-        if (!(e instanceof WebAssembly.RuntimeError)) this._detachChild(child);
+        // Yoga removed the child if the error came from a dirtied function.
+        if (dirtiedErrorAfterReturn) this._detachChild(child);
         throw e;
       }
       this._detachChild(child);
@@ -985,10 +991,17 @@ export default function wrapAssembly(lib: any): Yoga {
           try {
             dirtiedFunc(node);
           } catch (error) {
-            // A trap or abort means the module is already broken: don't hold
-            // it back behind an earlier error.
-            if (error instanceof WebAssembly.RuntimeError) throw error;
-            if (pendingDirtiedError === null) pendingDirtiedError = {error};
+            // Keep the first error, but let a trap or abort replace it: it
+            // means the module is broken, which matters more.
+            if (
+              pendingDirtiedError === null ||
+              (error instanceof WebAssembly.RuntimeError &&
+                !(
+                  pendingDirtiedError.error instanceof WebAssembly.RuntimeError
+                ))
+            ) {
+              pendingDirtiedError = {error};
+            }
           }
         });
         lib._jswrap_YGNodeSetDirtiedFunc(this._ptr);

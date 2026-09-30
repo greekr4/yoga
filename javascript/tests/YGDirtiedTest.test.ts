@@ -318,7 +318,7 @@ test('dirtied_func_exception_is_thrown_by_the_call_that_caused_it', () => {
   expect(innerError).toEqual(new Error('other failed'));
 });
 
-test('dirtied_func_runtime_error_is_not_held_back', () => {
+test('dirtied_func_runtime_error_takes_precedence', () => {
   const root = Yoga.Node.create();
   root.setAlignItems(Yoga.ALIGN_FLEX_START);
 
@@ -336,4 +336,25 @@ test('dirtied_func_runtime_error_is_not_held_back', () => {
   });
 
   expect(() => root_child0.setWidth(20)).toThrow(WebAssembly.RuntimeError);
+});
+
+test('dirtied_func_runtime_error_keeps_children_in_sync', () => {
+  const root = Yoga.Node.create();
+  root.setFlexDirection(Yoga.FLEX_DIRECTION_ROW);
+
+  const root_child0 = Yoga.Node.create();
+  root_child0.setWidth(10);
+  root.insertChild(root_child0, 0);
+  root.calculateLayout(undefined, undefined, Yoga.DIRECTION_LTR);
+
+  root.setDirtiedFunc(() => {
+    throw new WebAssembly.RuntimeError('dirtied failed');
+  });
+
+  const root_child1 = Yoga.Node.create();
+  expect(() => root.insertChild(root_child1, 1)).toThrow(
+    WebAssembly.RuntimeError,
+  );
+  expect(root.getChildCount()).toBe(2);
+  expect(root_child1.getParent()).toBe(root);
 });
