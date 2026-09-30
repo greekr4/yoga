@@ -292,3 +292,48 @@ test('dirtied_func_exception_is_rethrown_by_the_outermost_call', () => {
   expect(innerError).toBe(null);
   expect(root.isDirty()).toBe(true);
 });
+
+test('dirtied_func_exception_is_thrown_by_the_call_that_caused_it', () => {
+  const other = Yoga.Node.create();
+  other.setWidth(10);
+  other.calculateLayout(undefined, undefined, Yoga.DIRECTION_LTR);
+  other.setDirtiedFunc(() => {
+    throw new Error('other failed');
+  });
+
+  const root = Yoga.Node.create();
+  root.setWidth(100);
+  root.calculateLayout(undefined, undefined, Yoga.DIRECTION_LTR);
+
+  let innerError: unknown = null;
+  root.setDirtiedFunc(() => {
+    try {
+      other.setWidth(20);
+    } catch (e) {
+      innerError = e;
+    }
+  });
+
+  root.setWidth(50);
+  expect(innerError).toEqual(new Error('other failed'));
+});
+
+test('dirtied_func_runtime_error_is_not_held_back', () => {
+  const root = Yoga.Node.create();
+  root.setAlignItems(Yoga.ALIGN_FLEX_START);
+
+  const root_child0 = Yoga.Node.create();
+  root_child0.setWidth(10);
+  root_child0.setHeight(10);
+  root.insertChild(root_child0, 0);
+  root.calculateLayout(undefined, undefined, Yoga.DIRECTION_LTR);
+
+  root_child0.setDirtiedFunc(() => {
+    throw new Error('dirtied failed');
+  });
+  root.setDirtiedFunc(() => {
+    throw new WebAssembly.RuntimeError('aborted');
+  });
+
+  expect(() => root_child0.setWidth(20)).toThrow(WebAssembly.RuntimeError);
+});

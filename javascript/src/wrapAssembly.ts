@@ -284,10 +284,9 @@ export default function wrapAssembly(lib: any): Yoga {
   // A dirtied function runs while Yoga marks nodes dirty, deep inside
   // WebAssembly. An exception must not unwind those frames: the stack pointer
   // would not be restored and the nodes above would not be marked dirty. The
-  // bridge holds the first exception, and it is rethrown once the outermost
-  // call that can mark nodes dirty returns.
+  // bridge holds the first exception, and the call that marked the nodes
+  // dirty rethrows it once it returns.
   let pendingDirtiedError: {error: unknown} | null = null;
-  let dirtyingCallDepth = 0;
 
   // Wasm calls that can mark nodes dirty, and so run dirtied functions. Keep
   // this in sync when exposing another such call. They are wrapped only while
@@ -298,18 +297,20 @@ export default function wrapAssembly(lib: any): Yoga {
 
   function guardDirtyingCall(call: (...args: unknown[]) => unknown) {
     return (...args: unknown[]) => {
-      dirtyingCallDepth++;
+      // A call made from inside a dirtied function keeps its own error apart
+      // from the one held for the call that is still running.
+      const outerError = pendingDirtiedError;
+      pendingDirtiedError = null;
       let result;
       try {
         result = call(...args);
-      } finally {
-        dirtyingCallDepth--;
+      } catch (e) {
+        pendingDirtiedError = outerError;
+        throw e;
       }
-      if (dirtyingCallDepth === 0 && pendingDirtiedError !== null) {
-        const {error} = pendingDirtiedError;
-        pendingDirtiedError = null;
-        throw error;
-      }
+      const ownError = pendingDirtiedError;
+      pendingDirtiedError = outerError;
+      if (ownError !== null) throw ownError.error;
       return result;
     };
   }
@@ -970,6 +971,9 @@ export default function wrapAssembly(lib: any): Yoga {
           try {
             dirtiedFunc(node);
           } catch (error) {
+            // A trap or abort means the module is already broken: don't hold
+            // it back behind an earlier error.
+            if (error instanceof WebAssembly.RuntimeError) throw error;
             if (pendingDirtiedError === null) pendingDirtiedError = {error};
           }
         });
