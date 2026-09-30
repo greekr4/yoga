@@ -283,37 +283,51 @@ export default function wrapAssembly(lib: any): Yoga {
 
   // A dirtied function runs while Yoga marks nodes dirty, deep inside
   // WebAssembly. An exception must not unwind those frames: the stack pointer
-  // would not be restored and the nodes above would not be marked dirty. Hold
-  // the first exception and rethrow it once the call has returned.
+  // would not be restored and the nodes above would not be marked dirty. The
+  // bridge holds the first exception, and it is rethrown once the outermost
+  // call that can mark nodes dirty returns.
   let pendingDirtiedError: {error: unknown} | null = null;
+  let dirtyingCallDepth = 0;
 
-  function rethrowDirtiedError(): void {
-    if (pendingDirtiedError !== null) {
-      const {error} = pendingDirtiedError;
-      pendingDirtiedError = null;
-      throw error;
-    }
-  }
-
-  // Wasm calls that can mark nodes dirty, and so run dirtied functions. They
-  // are wrapped only once a dirtied function is set, so code that never sets
-  // one pays nothing.
+  // Wasm calls that can mark nodes dirty, and so run dirtied functions. Keep
+  // this in sync when exposing another such call. They are wrapped only while
+  // at least one dirtied function is set.
   const marksNodesDirty =
     /^_YGNode(?:StyleSet\w+|InsertChild|RemoveChild|MarkDirty|CopyStyle|SetIsReferenceBaseline)$/;
-  let dirtiedErrorsRethrown = false;
+  const unguardedCalls = new Map<string, (...args: unknown[]) => unknown>();
 
-  function rethrowDirtiedErrorsAfterCalls(): void {
-    if (dirtiedErrorsRethrown) return;
-    dirtiedErrorsRethrown = true;
-    for (const name of Object.keys(lib)) {
-      if (marksNodesDirty.test(name)) {
-        const call = lib[name];
-        lib[name] = (...args: unknown[]) => {
-          const result = call(...args);
-          rethrowDirtiedError();
-          return result;
-        };
+  function guardDirtyingCall(call: (...args: unknown[]) => unknown) {
+    return (...args: unknown[]) => {
+      dirtyingCallDepth++;
+      let result;
+      try {
+        result = call(...args);
+      } finally {
+        dirtyingCallDepth--;
       }
+      if (dirtyingCallDepth === 0 && pendingDirtiedError !== null) {
+        const {error} = pendingDirtiedError;
+        pendingDirtiedError = null;
+        throw error;
+      }
+      return result;
+    };
+  }
+
+  function updateDirtyingCallGuards(): void {
+    const guarded = unguardedCalls.size > 0;
+    const needed = lib._yogaDirtiedFuncs.size > 0;
+    if (needed === guarded) return;
+    if (needed) {
+      for (const name of Object.keys(lib)) {
+        if (marksNodesDirty.test(name)) {
+          unguardedCalls.set(name, lib[name]);
+          lib[name] = guardDirtyingCall(lib[name]);
+        }
+      }
+    } else {
+      for (const [name, call] of unguardedCalls) lib[name] = call;
+      unguardedCalls.clear();
     }
   }
 
@@ -407,6 +421,7 @@ export default function wrapAssembly(lib: any): Yoga {
     lib._yogaMeasureFuncs.delete(ptr);
     lib._yogaDirtiedFuncs.delete(ptr);
     lib._YGNodeFinalize(ptr);
+    updateDirtyingCallGuards();
   });
 
   // --- Config class ---
@@ -469,18 +484,28 @@ export default function wrapAssembly(lib: any): Yoga {
 
     // --- Tree hierarchy ---
     insertChild(child: NodeImpl, index: number): void {
-      lib._YGNodeInsertChild(this._ptr, child._ptr, index);
-      this._children.splice(index, 0, child);
-      child._parent = this;
+      // Update the JS tree even if a dirtied function throws: Yoga has already
+      // inserted the child by then.
+      try {
+        lib._YGNodeInsertChild(this._ptr, child._ptr, index);
+      } finally {
+        this._children.splice(index, 0, child);
+        child._parent = this;
+      }
     }
 
     removeChild(child: NodeImpl): void {
-      lib._YGNodeRemoveChild(this._ptr, child._ptr);
-      const idx = this._children.indexOf(child);
-      if (idx !== -1) {
-        this._children.splice(idx, 1);
+      // Update the JS tree even if a dirtied function throws: Yoga has already
+      // removed the child by then.
+      try {
+        lib._YGNodeRemoveChild(this._ptr, child._ptr);
+      } finally {
+        const idx = this._children.indexOf(child);
+        if (idx !== -1) {
+          this._children.splice(idx, 1);
+        }
+        child._parent = null;
       }
-      child._parent = null;
     }
 
     getChildCount(): number {
@@ -502,6 +527,7 @@ export default function wrapAssembly(lib: any): Yoga {
       this._children = [];
       this._parent = null;
       lib._YGNodeReset(this._ptr);
+      updateDirtyingCallGuards();
     }
 
     // --- Style setters ---
@@ -938,7 +964,6 @@ export default function wrapAssembly(lib: any): Yoga {
     setDirtiedFunc(dirtiedFunc: DirtiedFunction | null): void {
       if (dirtiedFunc) {
         const nodeWeakRef = new WeakRef(this);
-        rethrowDirtiedErrorsAfterCalls();
         lib._yogaDirtiedFuncs.set(this._ptr, () => {
           const node = nodeWeakRef.deref();
           if (!node) return;
@@ -949,6 +974,7 @@ export default function wrapAssembly(lib: any): Yoga {
           }
         });
         lib._jswrap_YGNodeSetDirtiedFunc(this._ptr);
+        updateDirtyingCallGuards();
       } else {
         this.unsetDirtiedFunc();
       }
@@ -957,6 +983,7 @@ export default function wrapAssembly(lib: any): Yoga {
     unsetDirtiedFunc(): void {
       lib._yogaDirtiedFuncs.delete(this._ptr);
       lib._jswrap_YGNodeUnsetDirtiedFunc(this._ptr);
+      updateDirtyingCallGuards();
     }
 
     // --- Dirty / Layout ---

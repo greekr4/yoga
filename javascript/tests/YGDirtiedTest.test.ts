@@ -147,3 +147,148 @@ test('dirtied_reset', () => {
   root.markDirty();
   expect(dirtied).toBe(1);
 });
+
+test('dirtied_func_exception_propagates_to_caller', () => {
+  const root = Yoga.Node.create();
+  root.setWidth(100);
+  root.setHeight(100);
+  root.calculateLayout(undefined, undefined, Yoga.DIRECTION_LTR);
+
+  root.setDirtiedFunc(() => {
+    throw new Error('dirtied failed');
+  });
+
+  expect(() => root.setWidth(50)).toThrow('dirtied failed');
+});
+
+test('layout_works_after_repeated_dirtied_func_exceptions', () => {
+  for (let i = 0; i < 5000; i++) {
+    const root = Yoga.Node.create();
+    const root_child0 = Yoga.Node.create();
+    root_child0.setWidth(10);
+    root_child0.setHeight(10);
+    root.insertChild(root_child0, 0);
+    root.calculateLayout(undefined, undefined, Yoga.DIRECTION_LTR);
+
+    root.setDirtiedFunc(() => {
+      throw new Error('dirtied failed');
+    });
+    expect(() => root_child0.setWidth(20)).toThrow('dirtied failed');
+  }
+
+  const root = Yoga.Node.create();
+  root.setWidth(100);
+  root.setHeight(100);
+  root.setAlignItems(Yoga.ALIGN_FLEX_START);
+
+  const root_child0 = Yoga.Node.create();
+  root_child0.setWidth(10);
+  root_child0.setHeight(10);
+  root.insertChild(root_child0, 0);
+  root.calculateLayout(undefined, undefined, Yoga.DIRECTION_LTR);
+
+  expect(root_child0.getComputedWidth()).toBe(10);
+  expect(root_child0.getComputedHeight()).toBe(10);
+});
+
+test('dirtied_func_exception_still_marks_ancestors_dirty', () => {
+  const root = Yoga.Node.create();
+  root.setAlignItems(Yoga.ALIGN_FLEX_START);
+  root.setWidth(100);
+  root.setHeight(100);
+
+  const root_child0 = Yoga.Node.create();
+  root_child0.setAlignItems(Yoga.ALIGN_FLEX_START);
+  root.insertChild(root_child0, 0);
+
+  const root_child0_child0 = Yoga.Node.create();
+  root_child0_child0.setWidth(10);
+  root_child0_child0.setHeight(10);
+  root_child0.insertChild(root_child0_child0, 0);
+
+  root.calculateLayout(undefined, undefined, Yoga.DIRECTION_LTR);
+  expect(root_child0.getComputedWidth()).toBe(10);
+
+  root_child0.setDirtiedFunc(() => {
+    throw new Error('dirtied failed');
+  });
+
+  expect(() => root_child0_child0.setWidth(30)).toThrow('dirtied failed');
+  expect(root_child0_child0.isDirty()).toBe(true);
+  expect(root_child0.isDirty()).toBe(true);
+  expect(root.isDirty()).toBe(true);
+
+  root_child0.setDirtiedFunc(null);
+  root.calculateLayout(undefined, undefined, Yoga.DIRECTION_LTR);
+
+  expect(root_child0_child0.getComputedWidth()).toBe(30);
+  expect(root_child0.getComputedWidth()).toBe(30);
+});
+
+test('dirtied_func_exception_keeps_children_in_sync', () => {
+  const root = Yoga.Node.create();
+  root.setFlexDirection(Yoga.FLEX_DIRECTION_ROW);
+  root.setWidth(100);
+  root.setHeight(100);
+
+  const root_child0 = Yoga.Node.create();
+  root_child0.setWidth(10);
+  root.insertChild(root_child0, 0);
+  root.calculateLayout(undefined, undefined, Yoga.DIRECTION_LTR);
+
+  root.setDirtiedFunc(() => {
+    throw new Error('dirtied failed');
+  });
+
+  const root_child1 = Yoga.Node.create();
+  root_child1.setWidth(20);
+  expect(() => root.insertChild(root_child1, 1)).toThrow('dirtied failed');
+  expect(root.getChildCount()).toBe(2);
+  expect(root.getChild(1)).toBe(root_child1);
+  expect(root_child1.getParent()).toBe(root);
+
+  root.calculateLayout(undefined, undefined, Yoga.DIRECTION_LTR);
+  expect(root_child1.getComputedLeft()).toBe(10);
+
+  expect(() => root.removeChild(root_child0)).toThrow('dirtied failed');
+  expect(root.getChildCount()).toBe(1);
+  expect(root.getChild(0)).toBe(root_child1);
+  expect(root_child0.getParent()).toBe(null);
+});
+
+test('dirtied_func_exception_is_rethrown_by_the_outermost_call', () => {
+  const other = Yoga.Node.create();
+
+  const root = Yoga.Node.create();
+  root.setAlignItems(Yoga.ALIGN_FLEX_START);
+  root.setWidth(100);
+  root.setHeight(100);
+
+  const root_child0 = Yoga.Node.create();
+  root_child0.setAlignItems(Yoga.ALIGN_FLEX_START);
+  root.insertChild(root_child0, 0);
+
+  const root_child0_child0 = Yoga.Node.create();
+  root_child0_child0.setWidth(10);
+  root_child0_child0.setHeight(10);
+  root_child0.insertChild(root_child0_child0, 0);
+  root.calculateLayout(undefined, undefined, Yoga.DIRECTION_LTR);
+
+  // Runs first, while root_child0_child0 is marked dirty.
+  root_child0_child0.setDirtiedFunc(() => {
+    throw new Error('dirtied failed');
+  });
+  // Runs next, and calls into Yoga from inside the dirtied function.
+  let innerError: unknown = null;
+  root_child0.setDirtiedFunc(() => {
+    try {
+      other.setWidth(5);
+    } catch (e) {
+      innerError = e;
+    }
+  });
+
+  expect(() => root_child0_child0.setWidth(30)).toThrow('dirtied failed');
+  expect(innerError).toBe(null);
+  expect(root.isDirty()).toBe(true);
+});
