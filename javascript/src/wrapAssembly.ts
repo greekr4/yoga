@@ -485,28 +485,42 @@ export default function wrapAssembly(lib: any): Yoga {
 
     // --- Tree hierarchy ---
     insertChild(child: NodeImpl, index: number): void {
-      // Update the JS tree even if a dirtied function throws: Yoga has already
-      // inserted the child by then.
       try {
         lib._YGNodeInsertChild(this._ptr, child._ptr, index);
-      } finally {
-        this._children.splice(index, 0, child);
-        child._parent = this;
+      } catch (e) {
+        // A dirtied function throws only after Yoga has inserted the child. A
+        // RuntimeError means Yoga aborted and the tree is unchanged.
+        if (!(e instanceof WebAssembly.RuntimeError)) {
+          this._attachChild(child, index);
+        }
+        throw e;
       }
+      this._attachChild(child, index);
+    }
+
+    _attachChild(child: NodeImpl, index: number): void {
+      this._children.splice(index, 0, child);
+      child._parent = this;
     }
 
     removeChild(child: NodeImpl): void {
-      // Update the JS tree even if a dirtied function throws: Yoga has already
-      // removed the child by then.
       try {
         lib._YGNodeRemoveChild(this._ptr, child._ptr);
-      } finally {
-        const idx = this._children.indexOf(child);
-        if (idx !== -1) {
-          this._children.splice(idx, 1);
-        }
-        child._parent = null;
+      } catch (e) {
+        // A dirtied function throws only after Yoga has removed the child. A
+        // RuntimeError means Yoga aborted and the tree is unchanged.
+        if (!(e instanceof WebAssembly.RuntimeError)) this._detachChild(child);
+        throw e;
       }
+      this._detachChild(child);
+    }
+
+    _detachChild(child: NodeImpl): void {
+      const idx = this._children.indexOf(child);
+      if (idx !== -1) {
+        this._children.splice(idx, 1);
+      }
+      child._parent = null;
     }
 
     getChildCount(): number {
